@@ -17,17 +17,14 @@ interface IModule extends Omit<Stats.FnModules, "identifier" | "reasons"> {
   reasons: IReason[]
 }
 
-const mapComponentsToStaticQueryHashes = (
-  staticQueryComponents: IGatsbyState["staticQueryComponents"]
-): Map<string, string> => {
-  const map = new Map()
-
-  staticQueryComponents.forEach(({ componentPath, hash }) => {
-    map.set(componentPath, hash)
-  })
-
-  return map
-}
+/* When we traverse upwards, we need to know where to stop. We'll call these terminal nodes.
+ * `async-requires.js` is the entry point for every page, while `api-runner-browser-plugins.js`
+ * is the one for `gatsby-browser` (where one would use wrapRootElement or wrapPageElement APIs)
+ */
+const entryNodes = [
+  `.cache/api-runner-browser-plugins.js`,
+  `.cache/async-requires.js`,
+]
 
 /* This function takes the current Redux state and a compilation
  * object from webpack and returns a map of unique templates
@@ -44,7 +41,7 @@ const mapComponentsToStaticQueryHashes = (
  *
  * Let's go through the implementation step by step.
  */
-export function mapTemplatesToStaticQueryHashes(
+export default function mapTemplatesToStaticQueryHashes(
   reduxState: IGatsbyState,
   compilation: ICompilation
 ): Map<string, Array<number>> {
@@ -58,15 +55,6 @@ export function mapTemplatesToStaticQueryHashes(
   const { components, staticQueryComponents } = reduxState
   const { modules } = compilation
 
-  /* When we traverse upwards, we need to know where to stop. We'll call these terminal nodes.
-   * `async-requires.js` is the entry point for every page, while `api-runner-browser-plugins.js`
-   * is the one for `gatsby-browser` (where one would use wrapRootElement or wrapPageElement APIs)
-   */
-  const terminalNodes = [
-    `.cache/api-runner-browser-plugins.js`,
-    `.cache/async-requires.js`,
-  ]
-
   /* We call the queries included above a page (via wrapRootElement or wrapPageElement APIs)
    * global queries. For now, we include these in every single page for simplicity. Overhead
    * here is not much since we are storing hashes (that reference separate result files)
@@ -79,23 +67,25 @@ export function mapTemplatesToStaticQueryHashes(
    * a Set of strings, each an absolute path of a dependent
    * of this module
    */
-  const getDeps = (mod: IModule): Set<string> => {
+  function getDeps(mod: IModule): Set<string> {
     const staticQueryModuleComponentPath = mod.resource
     const result = new Set<string>()
-    const seen = new Set<string>(mod.resource ? [mod.resource] : [])
+    const seen = new Set<string>(
+      staticQueryModuleComponentPath ? [staticQueryModuleComponentPath] : []
+    )
 
     // This is the body of the recursively called function
-    const getDepsFn = (m: IModule, seen: Set<string>): Set<string> => {
+    function getDepsRec(m: IModule, seen: Set<string>): Set<string> {
       // Reasons in webpack are literally reasons of why this module was included in the tree
       const hasReasons = m.hasReasons()
 
       // Is this node one of our known terminal nodes? See explanation above
-      const isTerminalNode = terminalNodes.some(terminalNode =>
-        m?.resource?.includes(terminalNode)
+      const isEntryNode = entryNodes.some(entryNode =>
+        m?.resource?.includes(entryNode)
       )
 
       // Exit if we don't have any reasons or we have reached a possible terminal node
-      if (!hasReasons || isTerminalNode) {
+      if (!hasReasons || isEntryNode) {
         return result
       }
 
@@ -104,8 +94,8 @@ export function mapTemplatesToStaticQueryHashes(
       const nonTerminalDependents: List<IModule> = m.reasons
         .filter(r => {
           const dependentModule = r.module
-          const isTerminal = terminalNodes.some(terminalNode =>
-            dependentModule?.resource?.includes(terminalNode)
+          const isTerminal = entryNodes.some(entryNode =>
+            dependentModule?.resource?.includes(entryNode)
           )
           return !isTerminal
         })
@@ -118,22 +108,23 @@ export function mapTemplatesToStaticQueryHashes(
       for (const uniqDependent of uniqDependents) {
         if (uniqDependent.resource) {
           result.add(uniqDependent.resource)
-          seen.add(uniqDependent.resource)
+          // Queries used in gatsby-browser are global and should be added to all pages
+          if (isGatsbyBrowser(uniqDependent)) {
+            if (staticQueryModuleComponentPath) {
+              globalStaticQueries.add(staticQueryModuleComponentPath)
+            }
+          } else {
+            seen.add(uniqDependent.resource)
+          }
         }
 
-        if (
-          uniqDependent?.resource?.includes(`gatsby-browser.js`) &&
-          staticQueryModuleComponentPath
-        ) {
-          globalStaticQueries.add(staticQueryModuleComponentPath)
-        }
-        getDepsFn(uniqDependent, seen)
+        getDepsRec(uniqDependent, seen)
       }
 
       return result
     }
 
-    return getDepsFn(mod, seen)
+    return getDepsRec(mod, seen)
   }
 
   const mapOfStaticQueryComponentsToDependants = new Map()
@@ -194,9 +185,25 @@ export function mapTemplatesToStaticQueryHashes(
 
     mapOfTemplatesToStaticQueryHashes.set(
       page.componentPath,
-      staticQueryHashes.sort()
+      staticQueryHashes.sort().map(String)
     )
   })
 
   return mapOfTemplatesToStaticQueryHashes
+}
+
+function mapComponentsToStaticQueryHashes(
+  staticQueryComponents: IGatsbyState["staticQueryComponents"]
+): Map<string, string> {
+  const map = new Map()
+
+  staticQueryComponents.forEach(({ componentPath, hash }) => {
+    map.set(componentPath, hash)
+  })
+
+  return map
+}
+
+function isGatsbyBrowser(m: IModule): boolean {
+  return !!m?.resource?.includes(`gatsby-browser.js`)
 }

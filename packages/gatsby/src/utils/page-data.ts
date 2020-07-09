@@ -141,7 +141,7 @@ export async function flush(): Promise<void> {
     // This is why we need this check
     if (page) {
       const staticQueryHashes =
-        staticQueriesByTemplate.get(page.componentPath)?.map(String) || []
+        staticQueriesByTemplate.get(page.componentPath) || []
 
       const result = await writePageData(
         path.join(program.directory, `public`),
